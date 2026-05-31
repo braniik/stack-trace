@@ -22,6 +22,8 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private static final int GRAZE_POINTS = 25;
     private static final int INDICATOR_FRAMES = 30;
     private static final int MAX_PENDING = 16;
+    private static final int MAX_CATCHES = 3;
+    private static final int INVULN_FRAMES = 48;
 
     // Bullet kinds: 0 = semicolon (rain), 1 = null (aimed), 2 = brace (spiral + walls).
     private static final String[] GLYPHS = {";", "null", "{"};
@@ -34,6 +36,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private static final Color DUKE_BLACK = new Color(20, 20, 20);
     private static final Color DUKE_GRAY = new Color(110, 110, 110);
     private static final Color CRASH_COLOR = new Color(220, 90, 80);
+    private static final Color ERROR_RED = new Color(235, 45, 40);
     private static final Color INDICATOR_COLOR = new Color(230, 120, 60);
 
     // Duke as a pixel sprite: K = black, W = white, R = nose red, G = gray edge, . = clear.
@@ -70,6 +73,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private final double[] velocityY = new double[MAX_BULLETS];
     private final int[] kind = new int[MAX_BULLETS];
     private final boolean[] grazed = new boolean[MAX_BULLETS];
+    private final boolean[] deadly = new boolean[MAX_BULLETS];
     private int bulletCount;
 
     // Pending attacks: an indicator window before bullets actually spawn.
@@ -89,6 +93,8 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private long score;
     private long framesSurvived;
     private int level;
+    private int catches;
+    private int invuln;
     private int spawnCooldown;
     private double spiralAngle;
     private boolean gameOver;
@@ -112,6 +118,8 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         score = 0;
         framesSurvived = 0;
         level = 1;
+        catches = MAX_CATCHES;
+        invuln = 0;
         spawnCooldown = 36;
         spiralAngle = 0;
         gameOver = false;
@@ -157,6 +165,11 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         return n;
     }
 
+    // Red = unrecoverable Error (instakill, ignores catches).
+    private double redChance() {
+        return Math.min(0.50, 0.05 + 0.07 * (Math.log(level) / Math.log(2)));
+    }
+
     private void addBullet(double x, double y, double vx, double vy, int bulletKind) {
         if (bulletCount >= MAX_BULLETS) {
             return;
@@ -168,6 +181,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         velocityY[index] = vy;
         kind[index] = bulletKind;
         grazed[index] = false;
+        deadly[index] = nextRandom() < redChance();
     }
 
     private void removeBullet(int index) {
@@ -178,6 +192,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         velocityY[index] = velocityY[last];
         kind[index] = kind[last];
         grazed[index] = grazed[last];
+        deadly[index] = deadly[last];
     }
 
     private void queueAttack(int type, double x, double y, double dirX, double dirY, double speed) {
@@ -287,6 +302,9 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         if (score >= scoreForLevel(level + 1)) {
             level++;
         }
+        if (invuln > 0) {
+            invuln--;
+        }
 
         if (movingUp) {
             dukeY -= DUKE_SPEED;
@@ -330,7 +348,17 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             double reachY = HALF_HEIGHT[kind[index]] + DUKE_RADIUS;
 
             if (distanceX < reachX && distanceY < reachY) {
-                gameOver = true;
+                if (invuln <= 0) {
+                    if (deadly[index]) {
+                        gameOver = true;
+                    } else if (--catches <= 0) {
+                        gameOver = true;
+                    } else {
+                        invuln = INVULN_FRAMES;
+                        removeBullet(index);
+                        continue;
+                    }
+                }
             } else if (!grazed[index]
                     && distanceX < reachX + GRAZE_BAND && distanceY < reachY + GRAZE_BAND) {
                 grazed[index] = true;
@@ -373,8 +401,10 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         graphics.drawString("}", BOX_X, BOX_Y + BOX_HEIGHT + 20);
         graphics.drawString("score " + score, BOX_X, 36);
         graphics.drawString("LV " + level, BOX_X + BOX_WIDTH - 48, 36);
+        graphics.drawString("catch " + catches + "/" + MAX_CATCHES, BOX_X + BOX_WIDTH / 2 - 28, 36);
 
         for (int i = 0; i < bulletCount; i++) {
+            graphics.setColor(deadly[i] ? ERROR_RED : FOREGROUND);
             graphics.drawString(GLYPHS[kind[i]],
                     (int) (positionX[i] - HALF_WIDTH[kind[i]]),
                     (int) (positionY[i] + 5));
@@ -405,18 +435,21 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         int spriteWidth = DUKE_SPRITE[0].length();
         int originX = (int) dukeX - spriteWidth * DUKE_PIXEL / 2;
         int originY = (int) dukeY - DUKE_SPRITE.length * DUKE_PIXEL / 2;
-        for (int row = 0; row < DUKE_SPRITE.length; row++) {
-            String line = DUKE_SPRITE[row];
-            for (int col = 0; col < spriteWidth; col++) {
-                char cell = line.charAt(col);
-                if (cell == '.') {
-                    continue;
+        boolean blinkOff = invuln > 0 && (invuln / 6) % 2 == 0;
+        if (!blinkOff) {
+            for (int row = 0; row < DUKE_SPRITE.length; row++) {
+                String line = DUKE_SPRITE[row];
+                for (int col = 0; col < spriteWidth; col++) {
+                    char cell = line.charAt(col);
+                    if (cell == '.') {
+                        continue;
+                    }
+                    graphics.setColor(cell == 'R' ? NOSE_RED
+                            : cell == 'K' ? DUKE_BLACK
+                              : cell == 'G' ? DUKE_GRAY
+                                : Color.WHITE);
+                    graphics.fillRect(originX + col * DUKE_PIXEL, originY + row * DUKE_PIXEL, DUKE_PIXEL, DUKE_PIXEL);
                 }
-                graphics.setColor(cell == 'R' ? NOSE_RED
-                        : cell == 'K' ? DUKE_BLACK
-                          : cell == 'G' ? DUKE_GRAY
-                            : Color.WHITE);
-                graphics.fillRect(originX + col * DUKE_PIXEL, originY + row * DUKE_PIXEL, DUKE_PIXEL, DUKE_PIXEL);
             }
         }
 
