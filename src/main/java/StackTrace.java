@@ -2,6 +2,7 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.Graphics;
+import java.awt.Graphics2D;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.event.KeyEvent;
@@ -20,17 +21,46 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private static final double GRAZE_BAND = 11.0;
     private static final int GRAZE_POINTS = 25;
 
-    // Bullet kinds: 0 = semicolon (rain), 1 = null (aimed NullPointer).
-    private static final String[] GLYPHS = {";", "null"};
-    private static final int[] HALF_WIDTH = {4, 16};
-    private static final int[] HALF_HEIGHT = {7, 7};
+    // Bullet kinds: 0 = semicolon (rain), 1 = null (aimed NullPointer), 2 = brace (spiral).
+    private static final String[] GLYPHS = {";", "null", "{"};
+    private static final int[] HALF_WIDTH = {4, 16, 4};
+    private static final int[] HALF_HEIGHT = {7, 7, 7};
 
     private static final Color BACKGROUND = new Color(8, 8, 8);
     private static final Color FOREGROUND = new Color(210, 210, 210);
-    private static final Color DUKE_COLOR = Color.WHITE;
+    private static final Color NOSE_RED = new Color(237, 28, 36);
+    private static final Color DUKE_BLACK = new Color(20, 20, 20);
+    private static final Color DUKE_GRAY = new Color(110, 110, 110);
     private static final Color CRASH_COLOR = new Color(220, 90, 80);
 
-    // Bullet pool as parallel arrays.
+    // Duke as a pixel sprite: K = black, W = white, R = nose red, G = gray edge, . = clear.
+    private static final int DUKE_PIXEL = 1;
+    private static final String[] DUKE_SPRITE = {
+            ".......G.......",
+            "......GKG......",
+            "......GKG......",
+            ".....GKKKG.....",
+            ".....GKKKG.....",
+            "....GKKKKKG....",
+            "....GKKKKKG....",
+            "...GKKKKKKKG...",
+            "...GKKRRRKKG...",
+            "..GKKRRRRRKKG..",
+            "..GKRRRRRRRKG..",
+            "..GKKRRRRRKKG..",
+            ".GKWWRRRWWWKG..",
+            ".GKWWWWWWWWKG..",
+            "GKWWWWWWWWWWKG.",
+            "GKWWWWWWWWWWKG.",
+            "GKWWWWWWWWWWKG.",
+            "GKWWWWWWWWWWKG.",
+            ".GKWWWWWWWWKG..",
+            ".GKWWWGGWWWKG..",
+            ".GKWKGG.GGKWKG.",
+            ".GKKG....GGKKG.",
+    };
+
+    // Bullet pool as parallel arrays (structure of arrays, swap-remove on cull).
     private final double[] positionX = new double[MAX_BULLETS];
     private final double[] positionY = new double[MAX_BULLETS];
     private final double[] velocityX = new double[MAX_BULLETS];
@@ -45,6 +75,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private long score;
     private long framesSurvived;
     private int spawnCooldown;
+    private double spiralAngle;
     private boolean gameOver;
 
     private long randomState = System.nanoTime();
@@ -65,6 +96,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         score = 0;
         framesSurvived = 0;
         spawnCooldown = 36;
+        spiralAngle = 0;
         gameOver = false;
         movingUp = movingDown = movingLeft = movingRight = false;
     }
@@ -103,13 +135,16 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private void spawnPattern() {
         double difficulty = framesSurvived / 600.0;
         double speed = 2.2 + difficulty;
-        if (nextRandom() < 0.55) {
+        double pick = nextRandom();
+        if (pick < 0.45) {
+            // Semicolon rain from above the top edge.
             int count = 1 + (int) (nextRandom() * 3);
             for (int n = 0; n < count; n++) {
                 double x = BOX_X + nextRandom() * BOX_WIDTH;
                 addBullet(x, BOX_Y - 12, (nextRandom() - 0.5) * 0.8, speed, 0);
             }
-        } else {
+        } else if (pick < 0.78) {
+            // NullPointer aimed at Duke's current position from a random edge.
             double originX, originY;
             int edge = (int) (nextRandom() * 4);
             if (edge == 0) {
@@ -133,6 +168,16 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             }
             double aimedSpeed = speed + 1.0;
             addBullet(originX, originY, towardX / length * aimedSpeed, towardY / length * aimedSpeed, 1);
+        } else {
+            // StackOverflow: a ring of braces from the box center, rotating each burst.
+            double centerX = BOX_X + BOX_WIDTH / 2.0;
+            double centerY = BOX_Y + BOX_HEIGHT / 2.0;
+            int arms = 5;
+            for (int a = 0; a < arms; a++) {
+                double angle = spiralAngle + a * (Math.PI * 2 / arms);
+                addBullet(centerX, centerY, Math.cos(angle) * speed, Math.sin(angle) * speed, 2);
+            }
+            spiralAngle += 0.5;
         }
     }
 
@@ -204,6 +249,11 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     protected void paintComponent(Graphics graphics) {
         super.paintComponent(graphics);
 
+        Graphics2D g2 = (Graphics2D) graphics;
+        double scale = Math.min(getWidth() / (double) PANEL_WIDTH, getHeight() / (double) PANEL_HEIGHT);
+        g2.translate((getWidth() - PANEL_WIDTH * scale) / 2, (getHeight() - PANEL_HEIGHT * scale) / 2);
+        g2.scale(scale, scale);
+
         graphics.setColor(FOREGROUND);
         graphics.drawRect(BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT);
         graphics.drawString("try {", BOX_X, BOX_Y - 8);
@@ -216,16 +266,27 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
                     (int) (positionY[i] + 5));
         }
 
-        int wedgeX = (int) dukeX;
-        int wedgeY = (int) dukeY;
-        int[] wedgeXs = {wedgeX, wedgeX - 7, wedgeX + 7};
-        int[] wedgeYs = {wedgeY - 9, wedgeY + 8, wedgeY + 8};
-        graphics.setColor(DUKE_COLOR);
-        graphics.fillPolygon(wedgeXs, wedgeYs, 3);
+        int spriteWidth = DUKE_SPRITE[0].length();
+        int originX = (int) dukeX - spriteWidth * DUKE_PIXEL / 2;
+        int originY = (int) dukeY - DUKE_SPRITE.length * DUKE_PIXEL / 2;
+        for (int row = 0; row < DUKE_SPRITE.length; row++) {
+            String line = DUKE_SPRITE[row];
+            for (int col = 0; col < spriteWidth; col++) {
+                char cell = line.charAt(col);
+                if (cell == '.') {
+                    continue;
+                }
+                graphics.setColor(cell == 'R' ? NOSE_RED
+                        : cell == 'K' ? DUKE_BLACK
+                          : cell == 'G' ? DUKE_GRAY
+                            : Color.WHITE);
+                graphics.fillRect(originX + col * DUKE_PIXEL, originY + row * DUKE_PIXEL, DUKE_PIXEL, DUKE_PIXEL);
+            }
+        }
 
         if (gameOver) {
             graphics.setColor(new Color(0, 0, 0, 170));
-            graphics.fillRect(0, 0, getWidth(), getHeight());
+            graphics.fillRect(0, 0, PANEL_WIDTH, PANEL_HEIGHT);
             graphics.setColor(CRASH_COLOR);
             graphics.drawString("Exception in thread \"main\"", 40, 150);
             graphics.drawString("java.lang.NullPointerException", 40, 170);
@@ -250,6 +311,8 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             movingRight = true;
         } else if (code == KeyEvent.VK_R && gameOver) {
             reset();
+        } else if (code == KeyEvent.VK_ESCAPE) {
+            System.exit(0);
         }
     }
 
@@ -280,10 +343,9 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     void main() {
         JFrame frame = new JFrame("Stack Trace");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setResizable(false);
+        frame.setUndecorated(true);
         frame.add(this);
-        frame.pack();
-        frame.setLocationRelativeTo(null);
+        frame.setExtendedState(JFrame.MAXIMIZED_BOTH);
         frame.setVisible(true);
         requestFocusInWindow();
         new Timer(16, this).start();
