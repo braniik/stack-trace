@@ -20,8 +20,10 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private static final double DUKE_SPEED = 3.4;
     private static final double GRAZE_BAND = 11.0;
     private static final int GRAZE_POINTS = 25;
+    private static final int INDICATOR_FRAMES = 30;
+    private static final int MAX_PENDING = 16;
 
-    // Bullet kinds: 0 = semicolon (rain), 1 = null (aimed NullPointer), 2 = brace (spiral).
+    // Bullet kinds: 0 = semicolon (rain), 1 = null (aimed), 2 = brace (spiral + walls).
     private static final String[] GLYPHS = {";", "null", "{"};
     private static final int[] HALF_WIDTH = {4, 16, 4};
     private static final int[] HALF_HEIGHT = {7, 7, 7};
@@ -32,6 +34,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private static final Color DUKE_BLACK = new Color(20, 20, 20);
     private static final Color DUKE_GRAY = new Color(110, 110, 110);
     private static final Color CRASH_COLOR = new Color(220, 90, 80);
+    private static final Color INDICATOR_COLOR = new Color(230, 120, 60);
 
     // Duke as a pixel sprite: K = black, W = white, R = nose red, G = gray edge, . = clear.
     private static final int DUKE_PIXEL = 1;
@@ -69,11 +72,23 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private final boolean[] grazed = new boolean[MAX_BULLETS];
     private int bulletCount;
 
+    // Pending attacks: an indicator window before bullets actually spawn.
+    // pendingType: 1 = aimed null, 2 = spiral ring. Geometry is locked at queue time.
+    private final int[] pendingType = new int[MAX_PENDING];
+    private final int[] pendingTimer = new int[MAX_PENDING];
+    private final double[] pendingX = new double[MAX_PENDING];
+    private final double[] pendingY = new double[MAX_PENDING];
+    private final double[] pendingDirX = new double[MAX_PENDING];
+    private final double[] pendingDirY = new double[MAX_PENDING];
+    private final double[] pendingSpeed = new double[MAX_PENDING];
+    private int pendingCount;
+
     private double dukeX, dukeY;
     private boolean movingUp, movingDown, movingLeft, movingRight;
 
     private long score;
     private long framesSurvived;
+    private int level;
     private int spawnCooldown;
     private double spiralAngle;
     private boolean gameOver;
@@ -91,22 +106,55 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
 
     private void reset() {
         bulletCount = 0;
+        pendingCount = 0;
         dukeX = BOX_X + BOX_WIDTH / 2.0;
         dukeY = BOX_Y + BOX_HEIGHT / 2.0;
         score = 0;
         framesSurvived = 0;
+        level = 1;
         spawnCooldown = 36;
         spiralAngle = 0;
         gameOver = false;
         movingUp = movingDown = movingLeft = movingRight = false;
     }
 
-    // xorshift64 -> [0, 1)
+    // xorshift64 -> [0, 1). The 0x1.0p-53 multiply maps the top 53 bits to a unit double.
     private double nextRandom() {
         randomState ^= randomState << 13;
         randomState ^= randomState >>> 7;
         randomState ^= randomState << 17;
         return (randomState >>> 11) * 0x1.0p-53;
+    }
+
+    // Quadratic term stretches later levels.
+    private long scoreForLevel(int n) {
+        return (n - 1) * 1000L + (long) (n - 1) * (n - 1) * 250L;
+    }
+
+    // Floored above INDICATOR_FRAMES so cues stay readable at high levels.
+    private int cooldownForLevel() {
+        int frames = (int) (48 - 6 * (Math.log(level + 1) / Math.log(2)));
+        return Math.max(INDICATOR_FRAMES + 8, frames);
+    }
+
+    // +1 at doubling thresholds (5, 10, 20, ...); keeps simultaneous threats dodgeable.
+    private int threatCap() {
+        if (level < 5) {
+            return 3;
+        }
+        return 3 + (int) (Math.log(level / 5.0) / Math.log(2)) + 1;
+    }
+
+    // Rain has no pending phase, so count its live bullets toward the cap directly;
+    // otherwise a braces wall plus an unwarned semicolon in the same row is undodgeable.
+    private int liveRainGroups() {
+        int n = 0;
+        for (int i = 0; i < bulletCount; i++) {
+            if (kind[i] == 0) {
+                n++;
+            }
+        }
+        return n;
     }
 
     private void addBullet(double x, double y, double vx, double vy, int bulletKind) {
@@ -132,19 +180,70 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         grazed[index] = grazed[last];
     }
 
+    private void queueAttack(int type, double x, double y, double dirX, double dirY, double speed) {
+        if (pendingCount >= MAX_PENDING) {
+            return;
+        }
+        int index = pendingCount++;
+        pendingType[index] = type;
+        pendingTimer[index] = INDICATOR_FRAMES;
+        pendingX[index] = x;
+        pendingY[index] = y;
+        pendingDirX[index] = dirX;
+        pendingDirY[index] = dirY;
+        pendingSpeed[index] = speed;
+    }
+
+    private void removePending(int index) {
+        int last = --pendingCount;
+        pendingType[index] = pendingType[last];
+        pendingTimer[index] = pendingTimer[last];
+        pendingX[index] = pendingX[last];
+        pendingY[index] = pendingY[last];
+        pendingDirX[index] = pendingDirX[last];
+        pendingDirY[index] = pendingDirY[last];
+        pendingSpeed[index] = pendingSpeed[last];
+    }
+
+    private void firePending(int index) {
+        if (pendingType[index] == 1) {
+            addBullet(pendingX[index], pendingY[index],
+                    pendingDirX[index] * pendingSpeed[index],
+                    pendingDirY[index] * pendingSpeed[index], 1);
+        } else if (pendingType[index] == 2) {
+            int arms = 5;
+            for (int a = 0; a < arms; a++) {
+                double angle = spiralAngle + a * (Math.PI * 2 / arms);
+                addBullet(pendingX[index], pendingY[index],
+                        Math.cos(angle) * pendingSpeed[index],
+                        Math.sin(angle) * pendingSpeed[index], 2);
+            }
+            spiralAngle += 0.5;
+        } else {
+            double gapY = pendingY[index];
+            double speed = pendingSpeed[index];
+            int rows = BOX_HEIGHT / 20;
+            for (int r = 0; r <= rows; r++) {
+                double y = BOX_Y + r * 20.0;
+                if (Math.abs(y - gapY) < 26) {
+                    continue;
+                }
+                addBullet(BOX_X - 8, y, speed, 0, 2);
+                addBullet(BOX_X + BOX_WIDTH + 8, y, -speed, 0, 2);
+            }
+        }
+    }
+
     private void spawnPattern() {
-        double difficulty = framesSurvived / 600.0;
-        double speed = 2.2 + difficulty;
+        double speed = 2.2 + level * 0.25;
         double pick = nextRandom();
-        if (pick < 0.45) {
-            // Semicolon rain from above the top edge.
+        if (pick < 0.38) {
             int count = 1 + (int) (nextRandom() * 3);
             for (int n = 0; n < count; n++) {
                 double x = BOX_X + nextRandom() * BOX_WIDTH;
                 addBullet(x, BOX_Y - 12, (nextRandom() - 0.5) * 0.8, speed, 0);
             }
-        } else if (pick < 0.78) {
-            // NullPointer aimed at Duke's current position from a random edge.
+        } else if (pick < 0.64) {
             double originX, originY;
             int edge = (int) (nextRandom() * 4);
             if (edge == 0) {
@@ -166,18 +265,16 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             if (length < 1.0) {
                 length = 1.0;
             }
-            double aimedSpeed = speed + 1.0;
-            addBullet(originX, originY, towardX / length * aimedSpeed, towardY / length * aimedSpeed, 1);
+            // Aim is locked here, at queue time, not recomputed on fire so the indicator line is honest and the player can juke out of it.
+            queueAttack(1, originX, originY, towardX / length, towardY / length, speed + 1.0);
+        } else if (pick < 0.84) {
+            double originX = BOX_X + 40 + nextRandom() * (BOX_WIDTH - 80);
+            double originY = BOX_Y + 40 + nextRandom() * (BOX_HEIGHT - 80);
+            queueAttack(2, originX, originY, 0, 0, speed);
         } else {
-            // StackOverflow: a ring of braces from the box center, rotating each burst.
-            double centerX = BOX_X + BOX_WIDTH / 2.0;
-            double centerY = BOX_Y + BOX_HEIGHT / 2.0;
-            int arms = 5;
-            for (int a = 0; a < arms; a++) {
-                double angle = spiralAngle + a * (Math.PI * 2 / arms);
-                addBullet(centerX, centerY, Math.cos(angle) * speed, Math.sin(angle) * speed, 2);
-            }
-            spiralAngle += 0.5;
+            // Gap center stored in pendingY so the indicator can show the safe row.
+            double gapY = BOX_Y + 40 + nextRandom() * (BOX_HEIGHT - 80);
+            queueAttack(3, 0, gapY, 0, 0, speed * 0.7);
         }
     }
 
@@ -187,6 +284,9 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         }
         framesSurvived++;
         score++;
+        if (score >= scoreForLevel(level + 1)) {
+            level++;
+        }
 
         if (movingUp) {
             dukeY -= DUKE_SPEED;
@@ -239,9 +339,21 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             index++;
         }
 
+        int pendingIndex = 0;
+        while (pendingIndex < pendingCount) {
+            if (--pendingTimer[pendingIndex] <= 0) {
+                firePending(pendingIndex);
+                removePending(pendingIndex);
+                continue;
+            }
+            pendingIndex++;
+        }
+
         if (--spawnCooldown <= 0) {
-            spawnPattern();
-            spawnCooldown = Math.max(6, 28 - (int) (framesSurvived / 150));
+            if (pendingCount + liveRainGroups() < threatCap()) {
+                spawnPattern();
+            }
+            spawnCooldown = cooldownForLevel();
         }
     }
 
@@ -249,6 +361,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     protected void paintComponent(Graphics graphics) {
         super.paintComponent(graphics);
 
+        // Scale the logical PANEL_WIDTH x PANEL_HEIGHT canvas to fill the window preserving aspect ratio and centering (letterbox stays background-black).
         Graphics2D g2 = (Graphics2D) graphics;
         double scale = Math.min(getWidth() / (double) PANEL_WIDTH, getHeight() / (double) PANEL_HEIGHT);
         g2.translate((getWidth() - PANEL_WIDTH * scale) / 2, (getHeight() - PANEL_HEIGHT * scale) / 2);
@@ -259,11 +372,34 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         graphics.drawString("try {", BOX_X, BOX_Y - 8);
         graphics.drawString("}", BOX_X, BOX_Y + BOX_HEIGHT + 20);
         graphics.drawString("score " + score, BOX_X, 36);
+        graphics.drawString("LV " + level, BOX_X + BOX_WIDTH - 48, 36);
 
         for (int i = 0; i < bulletCount; i++) {
             graphics.drawString(GLYPHS[kind[i]],
                     (int) (positionX[i] - HALF_WIDTH[kind[i]]),
                     (int) (positionY[i] + 5));
+        }
+
+        graphics.setColor(INDICATOR_COLOR);
+        for (int i = 0; i < pendingCount; i++) {
+            int px = (int) pendingX[i];
+            int py = (int) pendingY[i];
+            if (pendingType[i] == 1) {
+                int farX = px + (int) (pendingDirX[i] * 600);
+                int farY = py + (int) (pendingDirY[i] * 600);
+                graphics.drawLine(px, py, farX, farY);
+                graphics.drawString("NullPointerException", px - 60, py - 6);
+            } else if (pendingType[i] == 2) {
+                int radius = 6 + (INDICATOR_FRAMES - pendingTimer[i]) / 2;
+                graphics.drawOval(px - radius, py - radius, radius * 2, radius * 2);
+                graphics.drawString("StackOverflowError", px - 50, py - radius - 6);
+            } else {
+                graphics.drawLine(BOX_X, py - 26, BOX_X + 14, py - 26);
+                graphics.drawLine(BOX_X, py + 26, BOX_X + 14, py + 26);
+                graphics.drawLine(BOX_X + BOX_WIDTH - 14, py - 26, BOX_X + BOX_WIDTH, py - 26);
+                graphics.drawLine(BOX_X + BOX_WIDTH - 14, py + 26, BOX_X + BOX_WIDTH, py + 26);
+                graphics.drawString("} mismatched {", BOX_X + BOX_WIDTH / 2 - 44, py + 4);
+            }
         }
 
         int spriteWidth = DUKE_SPRITE[0].length();
