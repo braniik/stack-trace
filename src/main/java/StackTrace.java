@@ -24,6 +24,10 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private static final int MAX_PENDING = 16;
     private static final int MAX_CATCHES = 3;
     private static final int INVULN_FRAMES = 48;
+    private static final int MAX_PICKUPS = 8;
+    private static final double PICKUP_SPEED = 1.6;
+    private static final int HEAL_FLASH_FRAMES = 20;
+    private static final int SHIELD_FLASH_FRAMES = 14;
 
     // Bullet kinds: 0 = semicolon (rain), 1 = null (aimed), 2 = brace (spiral + walls).
     private static final String[] GLYPHS = {";", "null", "{"};
@@ -37,6 +41,8 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private static final Color DUKE_GRAY = new Color(110, 110, 110);
     private static final Color CRASH_COLOR = new Color(220, 90, 80);
     private static final Color ERROR_RED = new Color(235, 45, 40);
+    private static final Color HEAL_GREEN = new Color(90, 210, 110);
+    private static final Color SHIELD_CYAN = new Color(120, 220, 235);
     private static final Color INDICATOR_COLOR = new Color(230, 120, 60);
 
     // Duke as a pixel sprite: K = black, W = white, R = nose red, G = gray edge, . = clear.
@@ -87,6 +93,12 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private final double[] pendingSpeed = new double[MAX_PENDING];
     private int pendingCount;
 
+    // Falling pickups. pickupType: 0 = catch (+1 max capacity), 1 = finally (shield).
+    private final int[] pickupType = new int[MAX_PICKUPS];
+    private final double[] pickupX = new double[MAX_PICKUPS];
+    private final double[] pickupY = new double[MAX_PICKUPS];
+    private int pickupCount;
+
     private double dukeX, dukeY;
     private boolean movingUp, movingDown, movingLeft, movingRight;
 
@@ -94,6 +106,11 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private long framesSurvived;
     private int level;
     private int catches;
+    private int maxCatches;
+    private boolean shielded;
+    private int healFlash;
+    private int shieldFlash;
+    private int attackCount;
     private int invuln;
     private int spawnCooldown;
     private double spiralAngle;
@@ -118,8 +135,14 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         score = 0;
         framesSurvived = 0;
         level = 1;
+        maxCatches = MAX_CATCHES;
         catches = MAX_CATCHES;
+        shielded = false;
+        healFlash = 0;
+        shieldFlash = 0;
+        attackCount = 0;
         invuln = 0;
+        pickupCount = 0;
         spawnCooldown = 36;
         spiralAngle = 0;
         gameOver = false;
@@ -193,6 +216,23 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         kind[index] = kind[last];
         grazed[index] = grazed[last];
         deadly[index] = deadly[last];
+    }
+
+    private void spawnPickup() {
+        if (pickupCount >= MAX_PICKUPS) {
+            return;
+        }
+        int index = pickupCount++;
+        pickupType[index] = nextRandom() < 0.7 ? 0 : 1;
+        pickupX[index] = BOX_X + 20 + nextRandom() * (BOX_WIDTH - 40);
+        pickupY[index] = BOX_Y - 12;
+    }
+
+    private void removePickup(int index) {
+        int last = --pickupCount;
+        pickupType[index] = pickupType[last];
+        pickupX[index] = pickupX[last];
+        pickupY[index] = pickupY[last];
     }
 
     private void queueAttack(int type, double x, double y, double dirX, double dirY, double speed) {
@@ -301,11 +341,20 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         score++;
         if (score >= scoreForLevel(level + 1)) {
             level++;
+            if (catches < maxCatches) {
+                catches++;
+                healFlash = HEAL_FLASH_FRAMES;
+            }
         }
         if (invuln > 0) {
             invuln--;
         }
-
+        if (healFlash > 0) {
+            healFlash--;
+        }
+        if (shieldFlash > 0) {
+            shieldFlash--;
+        }
         if (movingUp) {
             dukeY -= DUKE_SPEED;
         }
@@ -349,6 +398,14 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
 
             if (distanceX < reachX && distanceY < reachY) {
                 if (invuln <= 0) {
+                    boolean lethal = deadly[index] || catches <= 1;
+                    if (lethal && shielded) {
+                        shielded = false;
+                        shieldFlash = SHIELD_FLASH_FRAMES;
+                        invuln = INVULN_FRAMES;
+                        removeBullet(index);
+                        continue;
+                    }
                     if (deadly[index]) {
                         gameOver = true;
                     } else if (--catches <= 0) {
@@ -377,11 +434,38 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             pendingIndex++;
         }
 
+        int pickupIndex = 0;
+        while (pickupIndex < pickupCount) {
+            pickupY[pickupIndex] += PICKUP_SPEED;
+            double reachX = DUKE_SPRITE[0].length() * DUKE_PIXEL / 2.0 + 12;
+            double reachY = DUKE_SPRITE.length * DUKE_PIXEL / 2.0 + 12;
+            if (Math.abs(dukeX - pickupX[pickupIndex]) < reachX
+                    && Math.abs(dukeY - pickupY[pickupIndex]) < reachY) {
+                if (pickupType[pickupIndex] == 0) {
+                    maxCatches++;
+                } else {
+                    shielded = true;
+                    shieldFlash = SHIELD_FLASH_FRAMES;
+                }
+                removePickup(pickupIndex);
+                continue;
+            }
+            if (pickupY[pickupIndex] > BOX_Y + BOX_HEIGHT + 20) {
+                removePickup(pickupIndex);
+                continue;
+            }
+            pickupIndex++;
+        }
+
         if (--spawnCooldown <= 0) {
             if (pendingCount + liveRainGroups() < threatCap()) {
                 spawnPattern();
             }
             spawnCooldown = cooldownForLevel();
+            attackCount++;
+            if (attackCount % 10 == 0 && nextRandom() < 0.10) {
+                spawnPickup();
+            }
         }
     }
 
@@ -401,7 +485,18 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         graphics.drawString("}", BOX_X, BOX_Y + BOX_HEIGHT + 20);
         graphics.drawString("score " + score, BOX_X, 36);
         graphics.drawString("LV " + level, BOX_X + BOX_WIDTH - 48, 36);
-        graphics.drawString("catch " + catches + "/" + MAX_CATCHES, BOX_X + BOX_WIDTH / 2 - 28, 36);
+        graphics.setColor(healFlash > 0 ? HEAL_GREEN : FOREGROUND);
+        graphics.drawString("catch " + catches + "/" + maxCatches, BOX_X + BOX_WIDTH / 2 - 28, 36);
+        if (shielded) {
+            graphics.setColor(SHIELD_CYAN);
+            graphics.drawString("finally", BOX_X + BOX_WIDTH / 2 - 22, 52);
+        }
+
+        for (int i = 0; i < pickupCount; i++) {
+            graphics.setColor(pickupType[i] == 0 ? HEAL_GREEN : SHIELD_CYAN);
+            graphics.drawString(pickupType[i] == 0 ? "+catch" : "finally",
+                    (int) pickupX[i] - 18, (int) pickupY[i] + 5);
+        }
 
         for (int i = 0; i < bulletCount; i++) {
             graphics.setColor(deadly[i] ? ERROR_RED : FOREGROUND);
@@ -451,6 +546,18 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
                     graphics.fillRect(originX + col * DUKE_PIXEL, originY + row * DUKE_PIXEL, DUKE_PIXEL, DUKE_PIXEL);
                 }
             }
+        }
+
+        if (shielded) {
+            graphics.setColor(SHIELD_CYAN);
+            int ringR = spriteWidth * DUKE_PIXEL;
+            graphics.drawOval((int) dukeX - ringR, (int) dukeY - ringR, ringR * 2, ringR * 2);
+        }
+
+        if (shieldFlash > 0) {
+            int alpha = 180 * shieldFlash / SHIELD_FLASH_FRAMES;
+            graphics.setColor(new Color(120, 220, 235, alpha));
+            graphics.fillRect(BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT);
         }
 
         if (gameOver) {
