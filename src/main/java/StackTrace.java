@@ -28,6 +28,10 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private static final double PICKUP_SPEED = 1.6;
     private static final int HEAL_FLASH_FRAMES = 20;
     private static final int SHIELD_FLASH_FRAMES = 14;
+    private static final int GRAZE_PER_HIT = 5;
+    private static final int SLEEP_COST = 50;
+    private static final int GC_COST = 100;
+    private static final int SLEEP_FRAMES = 180;
 
     // Bullet kinds: 0 = semicolon (rain), 1 = null (aimed), 2 = brace (spiral + walls).
     private static final String[] GLYPHS = {";", "null", "{"};
@@ -44,6 +48,8 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private static final Color HEAL_GREEN = new Color(90, 210, 110);
     private static final Color SHIELD_CYAN = new Color(120, 220, 235);
     private static final Color INDICATOR_COLOR = new Color(230, 120, 60);
+    private static final Color SLEEP_BLUE = new Color(120, 160, 235);
+    private static final Color GC_GREEN = new Color(90, 210, 130);
 
     // Duke as a pixel sprite: K = black, W = white, R = nose red, G = gray edge, . = clear.
     private static final int DUKE_PIXEL = 1;
@@ -112,6 +118,11 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private int shieldFlash;
     private int attackCount;
     private int invuln;
+    private boolean grazing;
+    private int grazeMeter;
+    private int lastAbility;
+    private int slowTimer;
+    private int gcFlash;
     private int spawnCooldown;
     private double spiralAngle;
     private boolean gameOver;
@@ -142,6 +153,11 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         shieldFlash = 0;
         attackCount = 0;
         invuln = 0;
+        grazing = false;
+        grazeMeter = 0;
+        lastAbility = 0;
+        slowTimer = 0;
+        gcFlash = 0;
         pickupCount = 0;
         spawnCooldown = 36;
         spiralAngle = 0;
@@ -216,6 +232,23 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         kind[index] = kind[last];
         grazed[index] = grazed[last];
         deadly[index] = deadly[last];
+    }
+
+    // ability: 1 = Thread.sleep (slow), 2 = System.gc (clear).
+    private void fireAbility(int ability) {
+        if (gameOver || lastAbility == ability) {
+            return;
+        }
+        if (ability == 1 && grazeMeter >= SLEEP_COST) {
+            grazeMeter -= SLEEP_COST;
+            slowTimer = SLEEP_FRAMES;
+            lastAbility = 1;
+        } else if (ability == 2 && grazeMeter >= GC_COST) {
+            grazeMeter -= GC_COST;
+            bulletCount = 0;
+            gcFlash = SHIELD_FLASH_FRAMES;
+            lastAbility = 2;
+        }
     }
 
     private void spawnPickup() {
@@ -355,6 +388,13 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         if (shieldFlash > 0) {
             shieldFlash--;
         }
+        if (slowTimer > 0) {
+            slowTimer--;
+        }
+        if (gcFlash > 0) {
+            gcFlash--;
+        }
+
         if (movingUp) {
             dukeY -= DUKE_SPEED;
         }
@@ -381,9 +421,11 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         }
 
         int index = 0;
+        grazing = false;
+        double timeScale = slowTimer > 0 ? 0.25 : 1.0;
         while (index < bulletCount) {
-            positionX[index] += velocityX[index];
-            positionY[index] += velocityY[index];
+            positionX[index] += velocityX[index] * timeScale;
+            positionY[index] += velocityY[index] * timeScale;
 
             if (positionX[index] < BOX_X - 40 || positionX[index] > BOX_X + BOX_WIDTH + 40
                     || positionY[index] < BOX_Y - 40 || positionY[index] > BOX_Y + BOX_HEIGHT + 40) {
@@ -416,10 +458,15 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
                         continue;
                     }
                 }
-            } else if (!grazed[index]
-                    && distanceX < reachX + GRAZE_BAND && distanceY < reachY + GRAZE_BAND) {
-                grazed[index] = true;
-                score += GRAZE_POINTS;
+            } else if (distanceX < reachX + GRAZE_BAND && distanceY < reachY + GRAZE_BAND) {
+                grazing = true;
+                if (!grazed[index]) {
+                    grazed[index] = true;
+                    score += GRAZE_POINTS;
+                    if (grazeMeter < GC_COST) {
+                        grazeMeter = Math.min(GC_COST, grazeMeter + GRAZE_PER_HIT);
+                    }
+                }
             }
             index++;
         }
@@ -457,7 +504,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             pickupIndex++;
         }
 
-        if (--spawnCooldown <= 0) {
+        if (slowTimer <= 0 && --spawnCooldown <= 0) {
             if (pendingCount + liveRainGroups() < threatCap()) {
                 spawnPattern();
             }
@@ -491,6 +538,21 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             graphics.setColor(SHIELD_CYAN);
             graphics.drawString("finally", BOX_X + BOX_WIDTH / 2 - 22, 52);
         }
+
+        int barWidth = BOX_WIDTH * grazeMeter / GC_COST;
+        graphics.setColor(DUKE_GRAY);
+        graphics.drawString("GRAZE " + grazeMeter + "/" + GC_COST, BOX_X, BOX_Y + BOX_HEIGHT + 52);
+        graphics.drawRect(BOX_X, BOX_Y + BOX_HEIGHT + 58, BOX_WIDTH, 8);
+        graphics.setColor(grazeMeter >= GC_COST ? GC_GREEN
+                : grazeMeter >= SLEEP_COST ? SLEEP_BLUE : DUKE_GRAY);
+        graphics.fillRect(BOX_X, BOX_Y + BOX_HEIGHT + 58, barWidth, 8);
+
+        boolean sleepReady = grazeMeter >= SLEEP_COST && lastAbility != 1;
+        boolean gcReady = grazeMeter >= GC_COST && lastAbility != 2;
+        graphics.setColor(sleepReady ? SLEEP_BLUE : DUKE_GRAY);
+        graphics.drawString("[Q] sleep 50", BOX_X, BOX_Y + BOX_HEIGHT + 78);
+        graphics.setColor(gcReady ? GC_GREEN : DUKE_GRAY);
+        graphics.drawString("[E] gc 100", BOX_X + BOX_WIDTH - 96, BOX_Y + BOX_HEIGHT + 78);
 
         for (int i = 0; i < pickupCount; i++) {
             graphics.setColor(pickupType[i] == 0 ? HEAL_GREEN : SHIELD_CYAN);
@@ -546,12 +608,46 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
                     graphics.fillRect(originX + col * DUKE_PIXEL, originY + row * DUKE_PIXEL, DUKE_PIXEL, DUKE_PIXEL);
                 }
             }
+            if (grazing) {
+                graphics.setColor(Color.WHITE);
+                int[] dRow = {-1, 1, 0, 0};
+                int[] dCol = {0, 0, -1, 1};
+                for (int row = 0; row < DUKE_SPRITE.length; row++) {
+                    for (int col = 0; col < spriteWidth; col++) {
+                        if (DUKE_SPRITE[row].charAt(col) == '.') {
+                            continue;
+                        }
+                        for (int n = 0; n < 4; n++) {
+                            int nr = row + dRow[n];
+                            int nc = col + dCol[n];
+                            boolean empty = nr < 0 || nr >= DUKE_SPRITE.length
+                                    || nc < 0 || nc >= spriteWidth
+                                    || DUKE_SPRITE[nr].charAt(nc) == '.';
+                            if (empty) {
+                                graphics.fillRect(originX + nc * DUKE_PIXEL,
+                                        originY + nr * DUKE_PIXEL, DUKE_PIXEL, DUKE_PIXEL);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         if (shielded) {
             graphics.setColor(SHIELD_CYAN);
             int ringR = spriteWidth * DUKE_PIXEL;
             graphics.drawOval((int) dukeX - ringR, (int) dukeY - ringR, ringR * 2, ringR * 2);
+        }
+
+        if (slowTimer > 0) {
+            graphics.setColor(new Color(SLEEP_BLUE.getRed(), SLEEP_BLUE.getGreen(), SLEEP_BLUE.getBlue(), 28));
+            graphics.fillRect(BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT);
+        }
+
+        if (gcFlash > 0) {
+            int alpha = 170 * gcFlash / SHIELD_FLASH_FRAMES;
+            graphics.setColor(new Color(GC_GREEN.getRed(), GC_GREEN.getGreen(), GC_GREEN.getBlue(), alpha));
+            graphics.fillRect(BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT);
         }
 
         if (shieldFlash > 0) {
@@ -585,6 +681,10 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             movingLeft = true;
         } else if (code == KeyEvent.VK_D) {
             movingRight = true;
+        } else if (code == KeyEvent.VK_Q) {
+            fireAbility(1);
+        } else if (code == KeyEvent.VK_E) {
+            fireAbility(2);
         } else if (code == KeyEvent.VK_R && gameOver) {
             reset();
         } else if (code == KeyEvent.VK_ESCAPE) {
