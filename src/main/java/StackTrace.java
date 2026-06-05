@@ -126,6 +126,8 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private int spawnCooldown;
     private double spiralAngle;
     private boolean gameOver;
+    private int deathKind;
+    private boolean deathByError;
 
     private long randomState = System.nanoTime();
 
@@ -450,8 +452,12 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
                     }
                     if (deadly[index]) {
                         gameOver = true;
+                        deathKind = kind[index];
+                        deathByError = true;
                     } else if (--catches <= 0) {
                         gameOver = true;
+                        deathKind = kind[index];
+                        deathByError = false;
                     } else {
                         invuln = INVULN_FRAMES;
                         removeBullet(index);
@@ -659,14 +665,29 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         if (gameOver) {
             graphics.setColor(new Color(0, 0, 0, 170));
             graphics.fillRect(0, 0, PANEL_WIDTH, PANEL_HEIGHT);
+
+            String thrown;
+            if (deathByError) {
+                thrown = deathKind == 2 ? "java.lang.StackOverflowError"
+                        : deathKind == 0 ? "java.lang.AssertionError"
+                          : "java.lang.VirtualMachineError";
+            } else {
+                thrown = deathKind == 1 ? "java.lang.NullPointerException"
+                        : deathKind == 2 ? "java.lang.IllegalStateException"
+                          : "java.lang.RuntimeException";
+            }
+
             graphics.setColor(CRASH_COLOR);
-            graphics.drawString("Exception in thread \"main\"", 40, 150);
-            graphics.drawString("java.lang.NullPointerException", 40, 170);
-            graphics.drawString("    at Duke.dodge(StackTrace.java)", 40, 192);
-            graphics.drawString("    at Duke.main(StackTrace.java)", 40, 210);
+            graphics.drawString("Exception in thread \"main\" " + thrown, 40, 150);
+            graphics.drawString("    at Duke.dodge(StackTrace.java:" + level + ")", 40, 172);
+            graphics.drawString("    at Duke.main(StackTrace.java)", 40, 190);
+            graphics.setColor(DUKE_GRAY);
+            graphics.drawString(deathByError
+                    ? "// fatal: an Error cannot be caught"
+                    : "// out of catches: exception escaped the try", 40, 216);
             graphics.setColor(FOREGROUND);
-            graphics.drawString("score " + score, 40, 244);
-            graphics.drawString("press R to recompile", 40, 266);
+            graphics.drawString("survived to LV " + level + "   score " + score, 40, 248);
+            graphics.drawString("press R to recompile", 40, 270);
         }
     }
 
