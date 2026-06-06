@@ -32,6 +32,20 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private static final int SLEEP_COST = 50;
     private static final int GC_COST = 100;
     private static final int SLEEP_FRAMES = 180;
+    private static final int BUILD_LEVEL = 10;
+    private static final int BUILD_DURATION = 500;
+    private static final int CHECK_WINDOW = 120;
+    private static final double CHECK_RADIUS = 24;
+    private static final int BUILD_COOLDOWN = 16;
+    private static final int BUILD_THREAT_CAP = 3;
+    private static final int BUILD_INTERMISSION = 90;
+    private static final int CLOSE_BULLETS = 12;
+    private static final double CLOSE_START_RADIUS = 150;
+    private static final double CLOSE_LOCK_RADIUS = 70;
+    private static final double CLOSE_MIN_RADIUS = 14;
+    private static final double CLOSE_RATE = 0.55;
+    private static final double CLOSE_SPIN = 0.018;
+    private static final int CLOSE_PERIOD = 150;
 
     // Bullet kinds: 0 = semicolon (rain), 1 = null (aimed), 2 = brace (spiral + walls).
     private static final String[] GLYPHS = {";", "null", "{"};
@@ -50,6 +64,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private static final Color INDICATOR_COLOR = new Color(230, 120, 60);
     private static final Color SLEEP_BLUE = new Color(120, 160, 235);
     private static final Color GC_GREEN = new Color(90, 210, 130);
+    private static final Color BUILD_GOLD = new Color(235, 195, 80);
 
     // Duke as a pixel sprite: K = black, W = white, R = nose red, G = gray edge, . = clear.
     private static final int DUKE_PIXEL = 1;
@@ -78,7 +93,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             ".GKKG....GGKKG.",
     };
 
-    // Bullet pool as parallel arrays (structure of arrays, swap-remove on cull).
+    // Bullet pool: structure of arrays, swap-remove on cull.
     private final double[] positionX = new double[MAX_BULLETS];
     private final double[] positionY = new double[MAX_BULLETS];
     private final double[] velocityX = new double[MAX_BULLETS];
@@ -88,8 +103,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private final boolean[] deadly = new boolean[MAX_BULLETS];
     private int bulletCount;
 
-    // Pending attacks: an indicator window before bullets actually spawn.
-    // pendingType: 1 = aimed null, 2 = spiral ring. Geometry is locked at queue time.
+    // pendingType: 1 = aimed null, 2 = spiral ring. An indicator window precedes the spawn.
     private final int[] pendingType = new int[MAX_PENDING];
     private final int[] pendingTimer = new int[MAX_PENDING];
     private final double[] pendingX = new double[MAX_PENDING];
@@ -128,6 +142,19 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private boolean gameOver;
     private int deathKind;
     private boolean deathByError;
+    private boolean building;
+    private boolean buildWon;
+    private boolean diedInBuild;
+    private int buildTimer;
+    private boolean checkActive;
+    private double checkX, checkY;
+    private int checkTimer;
+    private int buildIntermission;
+    private int closeTimer;
+    private boolean closeActive;
+    private boolean closeLocked;
+    private double closeCx, closeCy, closeRadius, closeAngle;
+    private int spentMilestone;
 
     private long randomState = System.nanoTime();
 
@@ -164,10 +191,18 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         spawnCooldown = 36;
         spiralAngle = 0;
         gameOver = false;
+        building = false;
+        buildWon = false;
+        diedInBuild = false;
+        checkActive = false;
+        closeActive = false;
+        closeLocked = false;
+        buildIntermission = 0;
+        spentMilestone = 0;
         movingUp = movingDown = movingLeft = movingRight = false;
     }
 
-    // xorshift64 -> [0, 1). The 0x1.0p-53 multiply maps the top 53 bits to a unit double.
+    // xorshift64 -> [0, 1).
     private double nextRandom() {
         randomState ^= randomState << 13;
         randomState ^= randomState >>> 7;
@@ -175,7 +210,6 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         return (randomState >>> 11) * 0x1.0p-53;
     }
 
-    // Quadratic term stretches later levels.
     private long scoreForLevel(int n) {
         return (n - 1) * 1000L + (long) (n - 1) * (n - 1) * 250L;
     }
@@ -186,7 +220,6 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         return Math.max(INDICATOR_FRAMES + 8, frames);
     }
 
-    // +1 at doubling thresholds (5, 10, 20, ...); keeps simultaneous threats dodgeable.
     private int threatCap() {
         if (level < 5) {
             return 3;
@@ -206,7 +239,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         return n;
     }
 
-    // Red = unrecoverable Error (instakill, ignores catches).
+    // Red = unrecoverable Error.
     private double redChance() {
         return Math.min(0.50, 0.05 + 0.07 * (Math.log(level) / Math.log(2)));
     }
@@ -238,7 +271,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
 
     // ability: 1 = Thread.sleep (slow), 2 = System.gc (clear).
     private void fireAbility(int ability) {
-        if (gameOver || lastAbility == ability) {
+        if (gameOver || building || lastAbility == ability) {
             return;
         }
         if (ability == 1 && grazeMeter >= SLEEP_COST) {
@@ -324,6 +357,68 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         }
     }
 
+    private boolean buildOffered() {
+        return level % BUILD_LEVEL == 0 && spentMilestone != level;
+    }
+
+    private void startBuild() {
+        spentMilestone = level;
+        building = true;
+        bulletCount = 0;
+        pendingCount = 0;
+        buildTimer = BUILD_DURATION;
+        buildIntermission = BUILD_INTERMISSION;
+        closeTimer = 0;
+        closeActive = false;
+        checkActive = false;
+    }
+
+    private void startClose() {
+        closeActive = true;
+        closeLocked = false;
+        closeCx = dukeX;
+        closeCy = dukeY;
+        closeRadius = CLOSE_START_RADIUS;
+        closeAngle = 0;
+    }
+
+    private void updateClose() {
+        closeAngle += CLOSE_SPIN;
+        closeRadius -= CLOSE_RATE;
+        if (!closeLocked) {
+            closeCx += (dukeX - closeCx) * 0.04;
+            closeCy += (dukeY - closeCy) * 0.04;
+            if (closeRadius <= CLOSE_LOCK_RADIUS) {
+                closeLocked = true;
+            }
+        }
+        if (closeRadius <= CLOSE_MIN_RADIUS) {
+            closeActive = false;
+            return;
+        }
+        for (int n = 0; n < CLOSE_BULLETS; n++) {
+            double a = closeAngle + n * (Math.PI * 2 / CLOSE_BULLETS);
+            double bx = closeCx + Math.cos(a) * closeRadius;
+            double by = closeCy + Math.sin(a) * closeRadius;
+            if (invuln <= 0 && Math.abs(dukeX - bx) < 6 + DUKE_RADIUS
+                    && Math.abs(dukeY - by) < 6 + DUKE_RADIUS) {
+                if (shielded) {
+                    shielded = false;
+                    shieldFlash = SHIELD_FLASH_FRAMES;
+                    invuln = INVULN_FRAMES;
+                } else if (catches <= 1) {
+                    gameOver = true;
+                    diedInBuild = true;
+                    deathKind = 2;
+                    deathByError = true;
+                } else {
+                    catches--;
+                    invuln = INVULN_FRAMES;
+                }
+            }
+        }
+    }
+
     private void spawnPattern() {
         double speed = 2.2 + level * 0.25;
         double pick = nextRandom();
@@ -369,16 +464,18 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     }
 
     private void update() {
-        if (gameOver) {
+        if (gameOver || buildWon) {
             return;
         }
         framesSurvived++;
-        score++;
-        if (score >= scoreForLevel(level + 1)) {
-            level++;
-            if (catches < maxCatches) {
-                catches++;
-                healFlash = HEAL_FLASH_FRAMES;
+        if (!building) {
+            score++;
+            if (score >= scoreForLevel(level + 1)) {
+                level++;
+                if (catches < maxCatches) {
+                    catches++;
+                    healFlash = HEAL_FLASH_FRAMES;
+                }
             }
         }
         if (invuln > 0) {
@@ -452,10 +549,12 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
                     }
                     if (deadly[index]) {
                         gameOver = true;
+                        diedInBuild = building;
                         deathKind = kind[index];
                         deathByError = true;
                     } else if (--catches <= 0) {
                         gameOver = true;
+                        diedInBuild = building;
                         deathKind = kind[index];
                         deathByError = false;
                     } else {
@@ -468,9 +567,11 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
                 grazing = true;
                 if (!grazed[index]) {
                     grazed[index] = true;
-                    score += GRAZE_POINTS;
-                    if (grazeMeter < GC_COST) {
-                        grazeMeter = Math.min(GC_COST, grazeMeter + GRAZE_PER_HIT);
+                    if (!building) {
+                        score += GRAZE_POINTS;
+                        if (grazeMeter < GC_COST) {
+                            grazeMeter = Math.min(GC_COST, grazeMeter + GRAZE_PER_HIT);
+                        }
                     }
                 }
             }
@@ -510,7 +611,43 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             pickupIndex++;
         }
 
-        if (slowTimer <= 0 && --spawnCooldown <= 0) {
+        if (building) {
+            if (closeActive) {
+                updateClose();
+            }
+            if (buildIntermission > 0) {
+                buildIntermission--;
+            } else {
+                buildTimer--;
+                if (!checkActive) {
+                    if (!closeActive && --closeTimer <= 0) {
+                        startClose();
+                        closeTimer = CLOSE_PERIOD;
+                    }
+                    if (--spawnCooldown <= 0) {
+                        int threats = pendingCount + liveRainGroups() + (closeActive ? 1 : 0);
+                        if (threats < BUILD_THREAT_CAP) {
+                            spawnPattern();
+                        }
+                        spawnCooldown = BUILD_COOLDOWN;
+                    }
+                    if (buildTimer <= 0) {
+                        checkActive = true;
+                        checkTimer = CHECK_WINDOW;
+                        checkX = BOX_X + 40 + nextRandom() * (BOX_WIDTH - 80);
+                        checkY = BOX_Y + 40 + nextRandom() * (BOX_HEIGHT - 80);
+                    }
+                } else {
+                    if (Math.hypot(dukeX - checkX, dukeY - checkY) < CHECK_RADIUS) {
+                        buildWon = true;
+                    } else if (--checkTimer <= 0) {
+                        building = false;
+                        checkActive = false;
+                        closeActive = false;
+                    }
+                }
+            }
+        } else if (slowTimer <= 0 && --spawnCooldown <= 0) {
             if (pendingCount + liveRainGroups() < threatCap()) {
                 spawnPattern();
             }
@@ -522,18 +659,28 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         }
     }
 
+    private void drawArrow(Graphics graphics, int fromX, int fromY, int toX, int toY) {
+        double angle = Math.atan2(toY - fromY, toX - fromX);
+        int tipX = fromX + (int) (Math.cos(angle) * 14);
+        int tipY = fromY + (int) (Math.sin(angle) * 14);
+        graphics.drawLine(fromX, fromY, tipX, tipY);
+        graphics.drawLine(tipX, tipY, tipX - (int) (Math.cos(angle - 0.5) * 7), tipY - (int) (Math.sin(angle - 0.5) * 7));
+        graphics.drawLine(tipX, tipY, tipX - (int) (Math.cos(angle + 0.5) * 7), tipY - (int) (Math.sin(angle + 0.5) * 7));
+    }
+
     @Override
     protected void paintComponent(Graphics graphics) {
         super.paintComponent(graphics);
 
-        // Scale the logical PANEL_WIDTH x PANEL_HEIGHT canvas to fill the window preserving aspect ratio and centering (letterbox stays background-black).
         Graphics2D g2 = (Graphics2D) graphics;
         double scale = Math.min(getWidth() / (double) PANEL_WIDTH, getHeight() / (double) PANEL_HEIGHT);
         g2.translate((getWidth() - PANEL_WIDTH * scale) / 2, (getHeight() - PANEL_HEIGHT * scale) / 2);
         g2.scale(scale, scale);
 
-        graphics.setColor(FOREGROUND);
+        boolean buildReady = buildOffered() && !buildWon && !gameOver;
+        graphics.setColor(buildReady || building ? BUILD_GOLD : FOREGROUND);
         graphics.drawRect(BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT);
+        graphics.setColor(FOREGROUND);
         graphics.drawString("try {", BOX_X, BOX_Y - 8);
         graphics.drawString("}", BOX_X, BOX_Y + BOX_HEIGHT + 20);
         graphics.drawString("score " + score, BOX_X, 36);
@@ -544,6 +691,14 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             graphics.setColor(SHIELD_CYAN);
             graphics.drawString("finally", BOX_X + BOX_WIDTH / 2 - 22, 52);
         }
+        if (building) {
+            graphics.setColor(BUILD_GOLD);
+            graphics.drawString(buildIntermission > 0 ? "// preparing to build..."
+                    : checkActive ? "// compiling..." : "// running build...", BOX_X + 70, BOX_Y - 8);
+        } else if (buildReady) {
+            graphics.setColor(BUILD_GOLD);
+            graphics.drawString("[B] attempt build", BOX_X + 70, BOX_Y - 8);
+        }
 
         int barWidth = BOX_WIDTH * grazeMeter / GC_COST;
         graphics.setColor(DUKE_GRAY);
@@ -553,8 +708,8 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
                 : grazeMeter >= SLEEP_COST ? SLEEP_BLUE : DUKE_GRAY);
         graphics.fillRect(BOX_X, BOX_Y + BOX_HEIGHT + 58, barWidth, 8);
 
-        boolean sleepReady = grazeMeter >= SLEEP_COST && lastAbility != 1;
-        boolean gcReady = grazeMeter >= GC_COST && lastAbility != 2;
+        boolean sleepReady = !building && grazeMeter >= SLEEP_COST && lastAbility != 1;
+        boolean gcReady = !building && grazeMeter >= GC_COST && lastAbility != 2;
         graphics.setColor(sleepReady ? SLEEP_BLUE : DUKE_GRAY);
         graphics.drawString("[Q] sleep 50", BOX_X, BOX_Y + BOX_HEIGHT + 78);
         graphics.setColor(gcReady ? GC_GREEN : DUKE_GRAY);
@@ -662,6 +817,43 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             graphics.fillRect(BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT);
         }
 
+        if (closeActive) {
+            graphics.setColor(FOREGROUND);
+            for (int n = 0; n < CLOSE_BULLETS; n++) {
+                double a = closeAngle + n * (Math.PI * 2 / CLOSE_BULLETS);
+                int bx = (int) (closeCx + Math.cos(a) * closeRadius);
+                int by = (int) (closeCy + Math.sin(a) * closeRadius);
+                graphics.drawString("{", bx - 4, by + 5);
+            }
+        }
+
+        if (checkActive) {
+            int cx = (int) checkX;
+            int cy = (int) checkY;
+            int pulse = (CHECK_WINDOW - checkTimer) % 16 < 8 ? 2 : 0;
+            int r = (int) CHECK_RADIUS + pulse;
+            graphics.setColor(GC_GREEN);
+            graphics.drawOval(cx - r, cy - r, r * 2, r * 2);
+            graphics.drawLine(cx - 9, cy, cx - 3, cy + 7);
+            graphics.drawLine(cx - 3, cy + 7, cx + 9, cy - 8);
+            drawArrow(graphics, BOX_X + BOX_WIDTH / 2, BOX_Y + 6, cx, cy);
+            drawArrow(graphics, BOX_X + BOX_WIDTH / 2, BOX_Y + BOX_HEIGHT - 6, cx, cy);
+            drawArrow(graphics, BOX_X + 6, BOX_Y + BOX_HEIGHT / 2, cx, cy);
+            drawArrow(graphics, BOX_X + BOX_WIDTH - 6, BOX_Y + BOX_HEIGHT / 2, cx, cy);
+        }
+
+        if (buildWon) {
+            graphics.setColor(new Color(0, 0, 0, 180));
+            graphics.fillRect(0, 0, PANEL_WIDTH, PANEL_HEIGHT);
+            graphics.setColor(GC_GREEN);
+            graphics.drawString("BUILD SUCCESSFUL", 40, 150);
+            graphics.setColor(DUKE_GRAY);
+            graphics.drawString("// the program compiled and ran to completion", 40, 176);
+            graphics.setColor(FOREGROUND);
+            graphics.drawString("final score " + score, 40, 208);
+            graphics.drawString("press R to recompile", 40, 230);
+        }
+
         if (gameOver) {
             graphics.setColor(new Color(0, 0, 0, 170));
             graphics.fillRect(0, 0, PANEL_WIDTH, PANEL_HEIGHT);
@@ -678,6 +870,11 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             }
 
             graphics.setColor(CRASH_COLOR);
+            if (diedInBuild) {
+                graphics.setColor(BUILD_GOLD);
+                graphics.drawString("BUILD FAILED", 40, 128);
+                graphics.setColor(CRASH_COLOR);
+            }
             graphics.drawString("Exception in thread \"main\" " + thrown, 40, 150);
             graphics.drawString("    at Duke.dodge(StackTrace.java:" + level + ")", 40, 172);
             graphics.drawString("    at Duke.main(StackTrace.java)", 40, 190);
@@ -706,8 +903,15 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             fireAbility(1);
         } else if (code == KeyEvent.VK_E) {
             fireAbility(2);
-        } else if (code == KeyEvent.VK_R && gameOver) {
+        } else if (code == KeyEvent.VK_B && !building && !buildWon && !gameOver && buildOffered()) {
+            startBuild();
+        } else if (code == KeyEvent.VK_R && (gameOver || buildWon)) {
             reset();
+        } else if (code == KeyEvent.VK_P && !gameOver && !buildWon) {
+            // DEBUG
+            level = 10;
+            score = scoreForLevel(10);
+            spentMilestone = 0;
         } else if (code == KeyEvent.VK_ESCAPE) {
             System.exit(0);
         }
