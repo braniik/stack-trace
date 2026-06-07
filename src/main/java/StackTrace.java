@@ -156,6 +156,8 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     private double closeCx, closeCy, closeRadius, closeAngle;
     private int spentMilestone;
 
+    private volatile boolean started;
+
     private long randomState = System.nanoTime();
 
     public StackTrace() {
@@ -464,7 +466,7 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     }
 
     private void update() {
-        if (gameOver || buildWon) {
+        if (!started || gameOver || buildWon) {
             return;
         }
         framesSurvived++;
@@ -659,6 +661,11 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         }
     }
 
+    private void drawCentered(Graphics graphics, String text, int y) {
+        int width = graphics.getFontMetrics().stringWidth(text);
+        graphics.drawString(text, BOX_X + (BOX_WIDTH - width) / 2, y);
+    }
+
     private void drawArrow(Graphics graphics, int fromX, int fromY, int toX, int toY) {
         double angle = Math.atan2(toY - fromY, toX - fromX);
         int tipX = fromX + (int) (Math.cos(angle) * 14);
@@ -676,6 +683,24 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
         double scale = Math.min(getWidth() / (double) PANEL_WIDTH, getHeight() / (double) PANEL_HEIGHT);
         g2.translate((getWidth() - PANEL_WIDTH * scale) / 2, (getHeight() - PANEL_HEIGHT * scale) / 2);
         g2.scale(scale, scale);
+
+        if (!started) {
+            graphics.setColor(FOREGROUND);
+            graphics.drawString("try {", BOX_X, BOX_Y - 8);
+            graphics.drawRect(BOX_X, BOX_Y, BOX_WIDTH, BOX_HEIGHT);
+            graphics.drawString("}", BOX_X, BOX_Y + BOX_HEIGHT + 20);
+            graphics.setColor(NOSE_RED);
+            drawCentered(graphics, "Stack Trace", BOX_Y + 60);
+            graphics.setColor(DUKE_GRAY);
+            drawCentered(graphics, "dodge the Throwables", BOX_Y + 88);
+            graphics.setColor(FOREGROUND);
+            drawCentered(graphics, "WASD to move", BOX_Y + 140);
+            drawCentered(graphics, "Q / E for Thread.sleep / System.gc", BOX_Y + 164);
+            drawCentered(graphics, "B to attempt build at LV 10+", BOX_Y + 188);
+            graphics.setColor(BUILD_GOLD);
+            drawCentered(graphics, "press any key to run", BOX_Y + 240);
+            return;
+        }
 
         boolean buildReady = buildOffered() && !buildWon && !gameOver;
         graphics.setColor(buildReady || building ? BUILD_GOLD : FOREGROUND);
@@ -891,6 +916,13 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
     @Override
     public void keyPressed(KeyEvent event) {
         int code = event.getKeyCode();
+        if (!started) {
+            if (code == KeyEvent.VK_ESCAPE) {
+                System.exit(0);
+            }
+            started = true;
+            return;
+        }
         if (code == KeyEvent.VK_W) {
             movingUp = true;
         } else if (code == KeyEvent.VK_S) {
