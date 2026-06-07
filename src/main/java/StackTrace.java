@@ -939,11 +939,6 @@ public class StackTrace extends JPanel implements KeyListener, ActionListener {
             startBuild();
         } else if (code == KeyEvent.VK_R && (gameOver || buildWon)) {
             reset();
-        } else if (code == KeyEvent.VK_P && !gameOver && !buildWon) {
-            // DEBUG
-            level = 10;
-            score = scoreForLevel(10);
-            spentMilestone = 0;
         } else if (code == KeyEvent.VK_ESCAPE) {
             System.exit(0);
         }
