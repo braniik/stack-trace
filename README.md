@@ -2,6 +2,10 @@
 
 A minimal single-class bullet-hell. Duke moves inside a `try { }` box and dodges glyphs drawn from the `Throwable` hierarchy. Written for the *Duke's 8-Bit Adventure* size challenge.
 
+I actually won the main category of the game size!! 🥳🥳
+
+<img width="424" height="223" alt="Screenshot_20260613_172402" src="https://github.com/user-attachments/assets/2ae066fc-68f7-4018-a293-06766ad54491" />
+
 <img width="2559" height="1545" alt="Screenshot_20260607_144027" src="https://github.com/user-attachments/assets/29aafadf-87a5-4e40-9463-6e41150bbc8c" />
 
 Total runtime size **18,067 bytes (17.64 KiB)** which qualifies for Golden Cartridge criteria with just one class and no asset files.
